@@ -1,0 +1,4 @@
+.env
+.byebug_history
+ebooks/*
+.DS_Store
