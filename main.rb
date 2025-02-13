@@ -32,6 +32,10 @@ OptionParser.new do |opts|
     options[:download_path] = download_path
   end
 
+  opts.on("--disable-idempotency", "Download every book regardless of if it has already been downloaded.") do |disable_idempotency|
+    options[:disable_idempotency] = true
+  end
+
   opts.on("-h", "--help", "Print this help") do
     puts opts
     exit
@@ -39,19 +43,20 @@ OptionParser.new do |opts|
 end.parse!
 
 class KindleDownloader
-  attr_accessor :username, :password, :device, :download_path
+  attr_accessor :username, :password, :device, :download_path, :disable_idempotency
 
   include Capybara::DSL
 
-  def initialize(download_path:, username: nil, password: nil, device: nil)
+  def initialize(download_path:, username: nil, password: nil, device: nil, disable_idempotency: false)
     self.username = username
     self.password = password
     self.device = device
     self.download_path = download_path
+    self.disable_idempotency = disable_idempotency
   end
 
   def download_ebooks
-    visit("/hz/mycd/digital-console/contentlist/booksAll/titleAsc/")
+    visit("/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/")
     sign_in
 
     page_number = 1
@@ -79,7 +84,7 @@ class KindleDownloader
   def download_book(book_row)
     return if book_row.text.include?("This title is unavailable for download and transfer")
     book_title = book_row.find(".digital_entity_title").text
-    if already_downloaded?(book_title)
+    if already_downloaded?(book_title) && !disable_idempotency
       puts "Skipping #{book_title}"
       return
     end
