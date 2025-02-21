@@ -4,12 +4,24 @@ require "ostruct"
 require "timeout"
 require "rotp"
 require "rqrcode"
+require "logger"
 
 require "rubygems"
 require "selenium-webdriver"
 require "capybara"
 require "capybara/dsl"
 require "concurrent"
+
+class ThreadSafeLogger < Logger
+  def initialize(*args)
+    super
+    @mutex = Mutex.new
+  end
+
+  def add(severity, message = nil, progname = nil, &block)
+    @mutex.synchronize { super }
+  end
+end
 
 options = {
   download_path: File.join(File.absolute_path(__dir__), "ebooks"),
@@ -66,7 +78,7 @@ OptionParser.new do |opts|
 end.parse!
 
 class KindleDownloader
-  attr_accessor :username, :password, :device, :download_path, :disable_idempotency, :headless
+  attr_accessor :username, :password, :device, :download_path, :disable_idempotency, :headless, :logger
 
   include Capybara::DSL
 
@@ -86,6 +98,15 @@ class KindleDownloader
     @totp = totp_secret ? ROTP::TOTP.new(totp_secret) : nil
     @valid_page_selector = nil
     self.headless = headless
+
+    log_path = File.join(download_path, "kindle_downloader.log")
+    File.delete(log_path) if clean_debug && File.exist?(log_path)
+    
+    self.logger = ThreadSafeLogger.new(log_path)
+    logger.formatter = proc do |severity, datetime, progname, msg|
+      "[#{datetime.strftime('%Y-%m-%d %H:%M:%S.%L')}] #{severity}: #{msg}\n"
+    end
+    logger.level = Logger::INFO
   end
 
 
@@ -169,7 +190,7 @@ class KindleDownloader
           titles: book_rows.map { |row| sanitize_title(title_from_row(row)) }.compact
         }
       rescue => ex
-        puts "error #{ex.message}"
+        logger.error "Page cache error: #{ex.message}"
         next
       end
     end
@@ -212,11 +233,11 @@ class KindleDownloader
     return if book_row.text.include?("This title is unavailable for download and transfer")
     book_title = book_row.find(".digital_entity_title").text
     if already_downloaded?(book_title) && !disable_idempotency
-      puts "Skipping #{book_title}"
+      logger.info "Skipping #{book_title}"
       return
     end
 
-    puts "Downloading #{book_title}..."
+    logger.info "Downloading #{book_title}..."
 
     book_row.find(".dropdown_title").click
     book_row.find("span", text: "Download & transfer via USB").click
@@ -227,9 +248,9 @@ class KindleDownloader
     if page.text.include?("You do not have any compatible devices")
       find("span", text: "Cancel").click
     end
-    puts "No download for this one #{book_title}"
+    logger.warn "Skipping unavailable: #{book_title}"
   rescue => _
-        puts "⚠️  Download failed: #{ex.message}".ljust(100)
+        logger.error "Download failed: #{ex.message}".ljust(100)
         session.execute_script("window.location.reload()")
      
   end
@@ -257,10 +278,10 @@ class KindleDownloader
         click_button("auth-signin-button")
 
         break unless has_selector?("#auth-error-message-box", wait: 2)
-        puts "⚠️  TOTP verification failed, retrying..." if attempt < 2
+        logger.warn "TOTP verification failed..." if attempt < 2
       end
     else
-      puts "❌ TOTP required but no secret configured. Set AMAZON_TOTP_SECRET"
+      logger.error "TOTP required but not configured"
       exit 1
     end
   end
@@ -296,5 +317,10 @@ else
     clean_debug: options[:clean_debug],
     concurrency: options[:concurrency],
     headless: options[:headless]
-  ).download_ebooks
+  )
+  begin
+    downloader.download_ebooks
+  ensure
+    downloader.logger.close
+  end
 end
