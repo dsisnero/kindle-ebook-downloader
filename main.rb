@@ -17,7 +17,8 @@ options = {
   username: ENV["AMAZON_USERNAME"],
   device: ENV["AMAZON_DEVICE"],
   totp_secret: ENV["AMAZON_TOTP_SECRET"],
-  concurrency: 3
+  concurrency: 3,
+  headless: false
 }
 
 
@@ -47,6 +48,15 @@ OptionParser.new do |opts|
   opts.on("-cCONCURRENCY", "--concurrency=CONCURRENCY", Integer,
           "Number of concurrent downloads (default: 3)") do |c|
     options[:concurrency] = c
+  end
+
+  opts.on("--headless", "Run browser in headless mode") do
+    options[:headless] = true
+  end
+
+  opts.on("--debug", "Enable debug mode (forces headless)") do
+    options[:clean_debug] = true 
+    options[:headless] = true
   end
 
   opts.on("-h", "--help", "Print this help") do
@@ -263,6 +273,11 @@ Capybara.register_driver :custom_download_path do |app|
   profile['devtools.console.stdout.content'] = true
 
   firefox_options = Selenium::WebDriver::Firefox::Options.new(profile:)
+  
+  # Add headless mode if enabled
+  if options[:headless]
+    firefox_options.add_argument('-headless')
+  end
 
   Capybara::Selenium::Driver.new(app, browser: :firefox, options: firefox_options)
 end
@@ -274,5 +289,9 @@ elsif options[:setup_totp]
 else
   Capybara.current_driver = :custom_download_path
   Capybara.app_host = "https://www.amazon.com"
-  KindleDownloader.new(**options.except(:setup_totp), clean_debug: options[:clean_debug]).download_ebooks
+  KindleDownloader.new(
+    **options.except(:setup_totp),
+    clean_debug: options[:clean_debug],
+    headless: options[:headless]
+  ).download_ebooks
 end
