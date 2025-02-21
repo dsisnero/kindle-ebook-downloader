@@ -178,12 +178,15 @@ class KindleDownloader
 
   def build_page_cache
     logger.info "Building page cache with #{@concurrency} threads"
-
+  
     # First get all page URLs from pagination
     pagination_links = all("[id^='page-']", wait: 10)
-    page_urls = [current_url] # Include initial page
+    page_urls = [current_url]
     pagination_links.each { |link| page_urls << link[:href] }
     page_urls.uniq!
+
+    # Reset main session before concurrent operations
+    Capybara.reset_sessions!
 
     executor = Concurrent::ThreadPoolExecutor.new(
       max_threads: @concurrency,
@@ -192,18 +195,24 @@ class KindleDownloader
 
     futures = page_urls.map.with_index do |url, index|
       Concurrent::Future.execute(executor: executor) do
-        Capybara.using_session("cache-#{index}") do
+        # Use unique session names with thread-safe identifiers
+        session_name = "cache-#{index}-#{Thread.current.object_id}"
+        
+        Capybara.using_session(session_name) do
           logger.info "Processing page #{index + 1}/#{page_urls.size}"
           visit(url)
-
+          
           {
             page_number: index + 1,
             url: current_url,
             titles: book_rows.map { |row| sanitize_title(title_from_row(row)) }.compact
           }
-        rescue StandardError => e
-          logger.error "Page #{index + 1} error: #{e.message}"
+        rescue => ex
+          logger.error "Page #{index + 1} error: #{ex.message}"
           nil
+        ensure
+          # Clean up session resources
+          Capybara.reset_session!
         end
       end
     end
