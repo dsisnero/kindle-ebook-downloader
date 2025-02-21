@@ -16,7 +16,8 @@ options = {
   password: ENV["AMAZON_PASSWORD"],
   username: ENV["AMAZON_USERNAME"],
   device: ENV["AMAZON_DEVICE"],
-  totp_secret: ENV["AMAZON_TOTP_SECRET"]
+  totp_secret: ENV["AMAZON_TOTP_SECRET"],
+  concurrency: 3
 }
 
 
@@ -43,6 +44,11 @@ OptionParser.new do |opts|
     options[:disable_idempotency] = true
   end
 
+  opts.on("-cCONCURRENCY", "--concurrency=CONCURRENCY", Integer,
+          "Number of concurrent downloads (default: 3)") do |c|
+    options[:concurrency] = c
+  end
+
   opts.on("-h", "--help", "Print this help") do
     puts opts
     exit
@@ -54,17 +60,17 @@ class KindleDownloader
 
   include Capybara::DSL
 
-  def initialize(download_path:, username: nil, password: nil, device: nil, 
-    disable_idempotency: false, totp_secret: nil, clean_debug: false)
+  def initialize(download_path:, username: nil, password: nil, device: nil,
+    disable_idempotency: false, totp_secret: nil, clean_debug: false, concurrency: 3)
     self.username = username
     self.password = password
     self.device = device
     self.download_path = download_path
     self.disable_idempotency = disable_idempotency
     @clean_debug = clean_debug
-
+    @concurrency = concurrency
     @page_cache = {}
-    @semaphore = ::Concurrent::Semaphore.new(3)
+    @semaphore = ::Concurrent::Semaphore.new(@concurrency)
     @cache_mutex = Mutex.new
     @totp = totp_secret ? ROTP::TOTP.new(totp_secret) : nil
     @valid_page_selector = nil
@@ -97,6 +103,23 @@ class KindleDownloader
   end
 
   def process_cache_concurrently
+    executor = Concurrent::ThreadPoolExecutor.new(
+      max_threads: @concurrency,
+      max_queue: @page_cache.size
+    )
+
+    futures = @page_cache.values.map do |page_data|
+      Concurrent::Future.execute(executor: executor) do
+        Capybara.using_session("page-#{page_data[:url]}") do
+          visit(page_data[:url])
+          download_page
+        end
+      end
+    end
+
+    futures.each(&:value)
+  ensure
+    executor&.shutdown
   end
 
   def do_download_ebooks
@@ -122,25 +145,23 @@ class KindleDownloader
 
   def build_page_cache
     page_cache = {}
-
     page_number = 1
 
     loop do
       begin
-      page_number = next_page(page_number)
-      break unless page_number
-      titles = book_rows.map do |book_row|
-        sanitize_title( title_from_row(book_row))
-      end.compact
-      page_cache[page_number] = titles
+        page_number = next_page(page_number)
+        break unless page_number
+        
+        page_cache[page_number] = {
+          url: current_url,
+          titles: book_rows.map { |row| sanitize_title(title_from_row(row)) }.compact
+        }
       rescue => ex
-         puts "error #{ex.message}"
-         next
+        puts "error #{ex.message}"
+        next
       end
     end
     page_cache
-  ensure
-    binding.irb
   end
 
   def next_page(page_number)
@@ -161,8 +182,17 @@ class KindleDownloader
   end
 
   def download_page
+    open_new_window
+    switch_to_window(windows.last)
+    
     find_all(".ListItem-module_row__3orql").each do |book_row|
       download_book(book_row)
+    end
+  ensure
+    if windows.length > 1
+      window = current_window
+      window.close
+      switch_to_window(windows.first)
     end
   end
 
