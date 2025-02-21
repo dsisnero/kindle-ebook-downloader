@@ -217,8 +217,9 @@ class KindleDownloader
     end
     puts "No download for this one #{book_title}"
   rescue => _
-    binding.irb
-    raise $1
+        puts "⚠️  Download failed: #{ex.message}".ljust(100)
+        session.execute_script("window.location.reload()")
+     
   end
 
   def sign_in
