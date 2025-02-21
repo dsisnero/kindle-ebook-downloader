@@ -1,16 +1,15 @@
+require 'optparse'
+require 'ostruct'
+require 'timeout'
+require 'rotp'
+require 'rqrcode'
+require 'logger'
 
-require "optparse"
-require "ostruct"
-require "timeout"
-require "rotp"
-require "rqrcode"
-require "logger"
-
-require "rubygems"
-require "selenium-webdriver"
-require "capybara"
-require "capybara/dsl"
-require "concurrent"
+require 'rubygems'
+require 'selenium-webdriver'
+require 'capybara'
+require 'capybara/dsl'
+require 'concurrent'
 
 class ThreadSafeLogger < Logger
   def initialize(*args)
@@ -24,54 +23,56 @@ class ThreadSafeLogger < Logger
 end
 
 options = {
-  download_path: File.join(File.absolute_path(__dir__), "ebooks"),
-  password: ENV["AMAZON_PASSWORD"],
-  username: ENV["AMAZON_USERNAME"],
-  device: ENV["AMAZON_DEVICE"],
-  totp_secret: ENV["AMAZON_TOTP_SECRET"],
+  download_path: File.join(File.absolute_path(__dir__), 'ebooks'),
+  password: ENV['AMAZON_PASSWORD'],
+  username: ENV['AMAZON_USERNAME'],
+  device: ENV['AMAZON_DEVICE'],
+  totp_secret: ENV['AMAZON_TOTP_SECRET'],
   concurrency: 3,
   headless: false
 }
 
-
 OptionParser.new do |opts|
-  opts.banner = "Usage: main.rb [options]"
+  opts.banner = 'Usage: main.rb [options]'
 
-  opts.on("-uUSERNAME", "--username=USERNAME", "Amazon Username") do |username|
+  opts.on('-uUSERNAME', '--username=USERNAME', 'Amazon Username') do |username|
     options[:username] = username
   end
 
-  opts.on("-pPASSWORD", "--password=PASSWORD", "Amazon Password, defaults to the AMAZON_PASSWORD environment variable (#{options[:password]})") do |password|
+  opts.on('-pPASSWORD', '--password=PASSWORD',
+          "Amazon Password, defaults to the AMAZON_PASSWORD environment variable (#{options[:password]})") do |password|
     options[:password] = password
   end
 
-  opts.on("-dDEVICE", "--device=DEVICE", "Kindle Device") do |device|
+  opts.on('-dDEVICE', '--device=DEVICE', 'Kindle Device') do |device|
     options[:device] = device
   end
 
-  opts.on("-p", "--path=DOWNLOAD_PATH", "Where to store downloaded books, default: '#{options[:download_path]}'") do |download_path|
+  opts.on('-p', '--path=DOWNLOAD_PATH',
+          "Where to store downloaded books, default: '#{options[:download_path]}'") do |download_path|
     options[:download_path] = download_path
   end
 
-  opts.on("--disable-idempotency", "Download every book regardless of if it has already been downloaded.") do |disable_idempotency|
+  opts.on('--disable-idempotency',
+          'Download every book regardless of if it has already been downloaded.') do |_disable_idempotency|
     options[:disable_idempotency] = true
   end
 
-  opts.on("-cCONCURRENCY", "--concurrency=CONCURRENCY", Integer,
-          "Number of concurrent downloads (default: 3)") do |c|
+  opts.on('-cCONCURRENCY', '--concurrency=CONCURRENCY', Integer,
+          'Number of concurrent downloads (default: 3)') do |c|
     options[:concurrency] = c
   end
 
-  opts.on("--headless", "Run browser in headless mode") do
+  opts.on('--headless', 'Run browser in headless mode') do
     options[:headless] = true
   end
 
-  opts.on("--debug", "Enable debug mode (forces headless)") do
-    options[:clean_debug] = true 
+  opts.on('--debug', 'Enable debug mode (forces headless)') do
+    options[:clean_debug] = true
     options[:headless] = true
   end
 
-  opts.on("-h", "--help", "Print this help") do
+  opts.on('-h', '--help', 'Print this help') do
     puts opts
     exit
   end
@@ -83,8 +84,8 @@ class KindleDownloader
   include Capybara::DSL
 
   def initialize(download_path:, username: nil, password: nil, device: nil,
-    disable_idempotency: false, totp_secret: nil, clean_debug: false, concurrency: 3,
-    headless: false)
+                 disable_idempotency: false, totp_secret: nil, clean_debug: false, concurrency: 3,
+                 headless: false)
     self.username = username
     self.password = password
     self.device = device
@@ -99,36 +100,35 @@ class KindleDownloader
     @valid_page_selector = nil
     self.headless = headless
 
-    log_path = File.join(download_path, "kindle_downloader.log")
+    log_path = File.join(download_path, 'kindle_downloader.log')
     File.delete(log_path) if clean_debug && File.exist?(log_path)
-    
+
     self.logger = ThreadSafeLogger.new(log_path)
-    logger.formatter = proc do |severity, datetime, progname, msg|
+    logger.formatter = proc do |severity, datetime, _progname, msg|
       "[#{datetime.strftime('%Y-%m-%d %H:%M:%S.%L')}] #{severity}: #{msg}\n"
     end
     logger.level = Logger::INFO
   end
 
-
   def sanitize_title(title)
     title.downcase
-      .gsub(/[^a-z0-9\s]/, '') # Remove special chars except spaces/numbers
-      .gsub(/\s+/, '_')        # Convert spaces to underscores
-      .gsub(/_+/, '_')         # Remove duplicate underscores
-      .chomp('_')
+         .gsub(/[^a-z0-9\s]/, '') # Remove special chars except spaces/numbers
+         .gsub(/\s+/, '_')        # Convert spaces to underscores
+         .gsub(/_+/, '_')         # Remove duplicate underscores
+         .chomp('_')
   end
 
   def book_downloaded?(clean_title)
-    @cache_mutex.synchronize {
+    @cache_mutex.synchronize do
       Dir.glob("#{download_path}/*").any? do |path|
         filename = File.basename(path, '.*')
         sanitize_title(filename).include?(clean_title)
       end
-    }
+    end
   end
 
   def download_ebooks
-    visit("/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/")
+    visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
     sign_in
     @page_cache = build_page_cache # Store in instance variable
     process_cache_concurrently
@@ -155,7 +155,7 @@ class KindleDownloader
   end
 
   def do_download_ebooks
-    visit("/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/")
+    visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
     sign_in
     build_page_cache
 
@@ -171,13 +171,14 @@ class KindleDownloader
   end
 
   def title_from_row(row)
-    return nil if row.text.include?("This title is unavailable for download and transfer")
-    row.find(".digital_entity_title").text
+    return nil if row.text.include?('This title is unavailable for download and transfer')
+
+    row.find('.digital_entity_title').text
   end
 
   def build_page_cache
     logger.info "Building page cache with #{@concurrency} threads"
-    
+
     # First get all page URLs from pagination
     pagination_links = all("[id^='page-']", wait: 10)
     page_urls = [current_url] # Include initial page
@@ -194,14 +195,14 @@ class KindleDownloader
         Capybara.using_session("cache-#{index}") do
           logger.info "Processing page #{index + 1}/#{page_urls.size}"
           visit(url)
-          
+
           {
             page_number: index + 1,
             url: current_url,
             titles: book_rows.map { |row| sanitize_title(title_from_row(row)) }.compact
           }
-        rescue => ex
-          logger.error "Page #{index + 1} error: #{ex.message}"
+        rescue StandardError => e
+          logger.error "Page #{index + 1} error: #{e.message}"
           nil
         end
       end
@@ -220,6 +221,7 @@ class KindleDownloader
 
   def next_page(page_number)
     return 2 if page_number == 1
+
     if page_sel = find("#page-#{page_number}")
       page_sel.click
       page_number + 1
@@ -228,18 +230,17 @@ class KindleDownloader
     end
   end
 
-  def book_rows
+  def book_rows(&block)
     return to_enum(__callee__) unless block_given?
-    find_all(".ListItem-module_row__3orql").each do |book_row|
-      yield book_row
-    end
+
+    find_all('.ListItem-module_row__3orql').each(&block)
   end
 
   def download_page
     open_new_window
     switch_to_window(windows.last)
-    
-    find_all(".ListItem-module_row__3orql").each do |book_row|
+
+    find_all('.ListItem-module_row__3orql').each do |book_row|
       download_book(book_row)
     end
   ensure
@@ -251,8 +252,9 @@ class KindleDownloader
   end
 
   def download_book(book_row)
-    return if book_row.text.include?("This title is unavailable for download and transfer")
-    book_title = book_row.find(".digital_entity_title").text
+    return if book_row.text.include?('This title is unavailable for download and transfer')
+
+    book_title = book_row.find('.digital_entity_title').text
     if already_downloaded?(book_title) && !disable_idempotency
       logger.info "Skipping #{book_title}"
       return
@@ -260,68 +262,61 @@ class KindleDownloader
 
     logger.info "Downloading #{book_title}..."
 
-    book_row.find(".dropdown_title").click
-    book_row.find("span", text: "Download & transfer via USB").click
-    find("li", text: device).find("input", visible: false).click
-    find_all("span", text: "Download").last.click
-    find("#notification-close").click
-  rescue Capybara::ElementNotFound => _
-    if page.text.include?("You do not have any compatible devices")
-      find("span", text: "Cancel").click
-    end
+    book_row.find('.dropdown_title').click
+    book_row.find('span', text: 'Download & transfer via USB').click
+    find('li', text: device).find('input', visible: false).click
+    find_all('span', text: 'Download').last.click
+    find('#notification-close').click
+  rescue Capybara::ElementNotFound => _e
+    find('span', text: 'Cancel').click if page.text.include?('You do not have any compatible devices')
     logger.warn "Skipping unavailable: #{book_title}"
-  rescue => _
-        logger.error "Download failed: #{ex.message}".ljust(100)
-        session.execute_script("window.location.reload()")
-     
+  rescue StandardError => _e
+    logger.error "Download failed: #{ex.message}".ljust(100)
+    session.execute_script('window.location.reload()')
   end
 
   def sign_in
     return unless username && password
 
-    fill_in("ap_email", with: username)
-    fill_in("ap_password", with: password)
-    click_button("signInSubmit")
+    fill_in('ap_email', with: username)
+    fill_in('ap_password', with: password)
+    click_button('signInSubmit')
 
     # Handle TOTP if required
-    if has_selector?("#auth-mfa-otpcode", wait: 10)
-      handle_totp_verification
-    end
+    handle_totp_verification if has_selector?('#auth-mfa-otpcode', wait: 10)
 
-    find("#nav-tools", wait: 10) # Wait for login completion
+    find('#nav-tools', wait: 10) # Wait for login completion
   end
 
   def handle_totp_verification
     if @totp
       3.times do |attempt| # Retry up to 3 times
         code = @totp.now
-        fill_in("auth-mfa-otpcode", with: code)
-        click_button("auth-signin-button")
+        fill_in('auth-mfa-otpcode', with: code)
+        click_button('auth-signin-button')
 
-        break unless has_selector?("#auth-error-message-box", wait: 2)
-        logger.warn "TOTP verification failed..." if attempt < 2
+        break unless has_selector?('#auth-error-message-box', wait: 2)
+
+        logger.warn 'TOTP verification failed...' if attempt < 2
       end
     else
-      logger.error "TOTP required but not configured"
+      logger.error 'TOTP required but not configured'
       exit 1
     end
   end
-
 end
 
 Capybara.register_driver :custom_download_path do |app|
   profile = Selenium::WebDriver::Firefox::Profile.new
-  profile["browser.download.dir"] = options[:download_path]
-  profile["browser.download.folderList"] = 2
+  profile['browser.download.dir'] = options[:download_path]
+  profile['browser.download.folderList'] = 2
   # Enable browser console logging
   profile['devtools.console.stdout.content'] = true
 
   firefox_options = Selenium::WebDriver::Firefox::Options.new(profile:)
-  
+
   # Add headless mode if enabled
-  if profile['devtools.console.stdout.content'] = true
-    firefox_options.add_argument('-headless')
-  end
+  firefox_options.add_argument('-headless') if profile['devtools.console.stdout.content'] = true
 
   Capybara::Selenium::Driver.new(app, browser: :firefox, options: firefox_options)
 end
@@ -332,7 +327,7 @@ elsif options[:setup_totp]
   # Existing TOTP setup code
 else
   Capybara.current_driver = :custom_download_path
-  Capybara.app_host = "https://www.amazon.com"
+  Capybara.app_host = 'https://www.amazon.com'
   downloader = KindleDownloader.new(
     **options.except(:setup_totp),
     clean_debug: options[:clean_debug],
