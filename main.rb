@@ -130,8 +130,7 @@ class KindleDownloader
   def download_ebooks
     visit("/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/")
     sign_in
-    page_cache = build_page_cache
-    binding.irb
+    @page_cache = build_page_cache # Store in instance variable
     process_cache_concurrently
   end
 
@@ -177,24 +176,45 @@ class KindleDownloader
   end
 
   def build_page_cache
-    page_cache = {}
-    page_number = 1
+    logger.info "Building page cache with #{@concurrency} threads"
+    
+    # First get all page URLs from pagination
+    pagination_links = all("[id^='page-']", wait: 10)
+    page_urls = [current_url] # Include initial page
+    pagination_links.each { |link| page_urls << link[:href] }
+    page_urls.uniq!
 
-    loop do
-      begin
-        page_number = next_page(page_number)
-        logger.info "building cache for #{page_number}"
-        break unless page_number
-        
-        page_cache[page_number] = {
-          url: current_url,
-          titles: book_rows.map { |row| sanitize_title(title_from_row(row)) }.compact
-        }
-      rescue => ex
-        logger.error "Page cache error: #{ex.message}"
-        next
+    executor = Concurrent::ThreadPoolExecutor.new(
+      max_threads: @concurrency,
+      max_queue: page_urls.size
+    )
+
+    futures = page_urls.map.with_index do |url, index|
+      Concurrent::Future.execute(executor: executor) do
+        Capybara.using_session("cache-#{index}") do
+          logger.info "Processing page #{index + 1}/#{page_urls.size}"
+          visit(url)
+          
+          {
+            page_number: index + 1,
+            url: current_url,
+            titles: book_rows.map { |row| sanitize_title(title_from_row(row)) }.compact
+          }
+        rescue => ex
+          logger.error "Page #{index + 1} error: #{ex.message}"
+          nil
+        end
       end
     end
+
+    page_cache = {}
+    futures.each do |future|
+      if (result = future.value)
+        page_cache[result[:page_number]] = result
+      end
+    end
+
+    logger.info "Built cache for #{page_cache.size}/#{page_urls.size} pages"
     page_cache
   end
 
