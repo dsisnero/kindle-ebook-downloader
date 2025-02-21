@@ -183,6 +183,7 @@ class KindleDownloader
     loop do
       begin
         page_number = next_page(page_number)
+        logger.info "building cache for #{page_number}"
         break unless page_number
         
         page_cache[page_number] = {
