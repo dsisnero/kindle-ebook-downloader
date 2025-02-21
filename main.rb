@@ -66,12 +66,13 @@ OptionParser.new do |opts|
 end.parse!
 
 class KindleDownloader
-  attr_accessor :username, :password, :device, :download_path, :disable_idempotency
+  attr_accessor :username, :password, :device, :download_path, :disable_idempotency, :headless
 
   include Capybara::DSL
 
   def initialize(download_path:, username: nil, password: nil, device: nil,
-    disable_idempotency: false, totp_secret: nil, clean_debug: false, concurrency: 3)
+    disable_idempotency: false, totp_secret: nil, clean_debug: false, concurrency: 3,
+    headless: false)
     self.username = username
     self.password = password
     self.device = device
@@ -84,6 +85,7 @@ class KindleDownloader
     @cache_mutex = Mutex.new
     @totp = totp_secret ? ROTP::TOTP.new(totp_secret) : nil
     @valid_page_selector = nil
+    self.headless = headless
   end
 
 
@@ -275,7 +277,7 @@ Capybara.register_driver :custom_download_path do |app|
   firefox_options = Selenium::WebDriver::Firefox::Options.new(profile:)
   
   # Add headless mode if enabled
-  if options[:headless]
+  if profile['devtools.console.stdout.content'] = true
     firefox_options.add_argument('-headless')
   end
 
@@ -292,6 +294,7 @@ else
   KindleDownloader.new(
     **options.except(:setup_totp),
     clean_debug: options[:clean_debug],
+    concurrency: options[:concurrency],
     headless: options[:headless]
   ).download_ebooks
 end
