@@ -312,7 +312,7 @@ elsif options[:setup_totp]
 else
   Capybara.current_driver = :custom_download_path
   Capybara.app_host = "https://www.amazon.com"
-  KindleDownloader.new(
+  downloader = KindleDownloader.new(
     **options.except(:setup_totp),
     clean_debug: options[:clean_debug],
     concurrency: options[:concurrency],
