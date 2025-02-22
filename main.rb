@@ -111,6 +111,8 @@ class KindleDownloader
   end
 
   def sanitize_title(title)
+    return '' unless title
+    
     title.downcase
          .gsub(/[^a-z0-9\s]/, '') # Remove special chars except spaces/numbers
          .gsub(/\s+/, '_')        # Convert spaces to underscores
@@ -178,16 +180,14 @@ class KindleDownloader
 
   def build_page_cache
     logger.info "Building page cache with #{@concurrency} threads"
-  
-    # First get all page URLs from pagination
-    pagination_links = all("[id^='page-']", wait: 10)
+    
+    # Get all page URLs first using main session
     page_urls = [current_url]
+    pagination_links = all("[id^='page-']", wait: 10)
     pagination_links.each { |link| page_urls << link[:href] }
     page_urls.uniq!
 
-    # Reset main session before concurrent operations
-    Capybara.reset_sessions!
-
+    # Create completely independent sessions for each thread
     executor = Concurrent::ThreadPoolExecutor.new(
       max_threads: @concurrency,
       max_queue: page_urls.size
@@ -195,33 +195,37 @@ class KindleDownloader
 
     futures = page_urls.map.with_index do |url, index|
       Concurrent::Future.execute(executor: executor) do
-        # Use unique session names with thread-safe identifiers
-        session_name = "cache-#{index}-#{Thread.current.object_id}"
+        # Create new independent session
+        session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
         
-        Capybara.using_session(session_name) do
+        begin
           logger.info "Processing page #{index + 1}/#{page_urls.size}"
-          visit(url)
+          session.visit(url)
           
+          titles = session.all('.ListItem-module_row__3orql').map do |row|
+            next if row.text.include?('This title is unavailable')
+            
+            title = row.find('.digital_entity_title').text rescue nil
+            sanitize_title(title) if title
+          end.compact
+
           {
             page_number: index + 1,
-            url: current_url,
-            titles: book_rows.map { |row| sanitize_title(title_from_row(row)) }.compact
+            url: session.current_url,
+            titles: titles
           }
         rescue => ex
           logger.error "Page #{index + 1} error: #{ex.message}"
           nil
         ensure
-          # Clean up session resources
-          Capybara.reset_session!
+          session.driver.quit
         end
       end
     end
 
-    page_cache = {}
-    futures.each do |future|
-      if (result = future.value)
-        page_cache[result[:page_number]] = result
-      end
+    page_cache = futures.each_with_object({}) do |future, cache|
+      result = future.value
+      cache[result[:page_number]] = result if result
     end
 
     logger.info "Built cache for #{page_cache.size}/#{page_urls.size} pages"
@@ -319,15 +323,18 @@ Capybara.register_driver :custom_download_path do |app|
   profile = Selenium::WebDriver::Firefox::Profile.new
   profile['browser.download.dir'] = options[:download_path]
   profile['browser.download.folderList'] = 2
-  # Enable browser console logging
   profile['devtools.console.stdout.content'] = true
 
   firefox_options = Selenium::WebDriver::Firefox::Options.new(profile:)
+  firefox_options.add_argument('-headless') if options[:headless]
 
-  # Add headless mode if enabled
-  firefox_options.add_argument('-headless') if profile['devtools.console.stdout.content'] = true
-
-  Capybara::Selenium::Driver.new(app, browser: :firefox, options: firefox_options)
+  Capybara::Selenium::Driver.new(
+    app,
+    browser: :firefox,
+    options: firefox_options,
+    clear_local_storage: true,
+    clear_session_storage: true
+  )
 end
 
 if options[:analyze_debug]
