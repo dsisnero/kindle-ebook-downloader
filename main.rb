@@ -28,7 +28,7 @@ options = {
   username: ENV['AMAZON_USERNAME'],
   device: ENV['AMAZON_DEVICE'],
   totp_secret: ENV['AMAZON_TOTP_SECRET'],
-  concurrency: 3,
+  concurrency: 10,
   headless: false
 }
 
@@ -186,6 +186,8 @@ class KindleDownloader
     pagination_links = all("[id^='page-']", wait: 10)
     pagination_links.each { |link| page_urls << link[:href] }
     page_urls.uniq!
+    logger.info "page count: #{page_urls.count}"
+    binding.irb
 
     # Create completely independent sessions for each thread
     executor = Concurrent::ThreadPoolExecutor.new(
