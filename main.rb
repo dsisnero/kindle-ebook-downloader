@@ -122,11 +122,28 @@ class KindleDownloader
 
   def book_downloaded?(clean_title)
     @cache_mutex.synchronize do
-      Dir.glob("#{download_path}/*").any? do |path|
-        filename = File.basename(path, '.*')
-        sanitize_title(filename).include?(clean_title)
-      end
+      Dir.glob("#{download_path}/#{clean_title}.*").any?
     end
+  end
+
+  def attempt_download(clean_title)
+    visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
+    
+    # Find the specific book row using the cached title
+    book_row = find('.digital_entity_title', text: /#{Regexp.escape(clean_title)}/i)
+                            .ancestor('.ListItem-module_row__3orql')
+
+    book_row.find('.dropdown_title').click
+    book_row.find('span', text: 'Download & transfer via USB').click
+    find('li', text: device).find('input', visible: false).click
+    find_all('span', text: 'Download').last.click
+    find('#notification-close').click
+  rescue Capybara::ElementNotFound => e
+    logger.warn "Skipping unavailable: #{clean_title}"
+  rescue => e
+    logger.error "Retrying #{clean_title}: #{e.message}"
+    page.execute_script('window.location.reload()')
+    retry
   end
 
   def download_ebooks
@@ -137,16 +154,27 @@ class KindleDownloader
   end
 
   def process_cache_concurrently
+    logger.info "Starting concurrent processing of #{@page_cache.size} pages"
+    
     executor = Concurrent::ThreadPoolExecutor.new(
       max_threads: @concurrency,
       max_queue: @page_cache.size
     )
 
-    futures = @page_cache.values.map do |page_data|
-      Concurrent::Future.execute(executor: executor) do
-        Capybara.using_session("page-#{page_data[:url]}") do
-          visit(page_data[:url])
-          download_page
+    # Process all titles from cache instead of visiting pages again
+    futures = @page_cache.values.flat_map do |page_data|
+      page_data[:titles].map do |clean_title|
+        Concurrent::Future.execute(executor: executor) do
+          next if book_downloaded?(clean_title) && !disable_idempotency
+
+          Capybara.using_session("download-#{clean_title}") do
+            begin
+              logger.info "Downloading #{clean_title}"
+              attempt_download(clean_title)
+            rescue => ex
+              logger.error "Failed to download #{clean_title}: #{ex.message}"
+            end
+          end
         end
       end
     end
@@ -251,44 +279,7 @@ class KindleDownloader
     find_all('.ListItem-module_row__3orql').each(&block)
   end
 
-  def download_page
-    open_new_window
-    switch_to_window(windows.last)
 
-    find_all('.ListItem-module_row__3orql').each do |book_row|
-      download_book(book_row)
-    end
-  ensure
-    if windows.length > 1
-      window = current_window
-      window.close
-      switch_to_window(windows.first)
-    end
-  end
-
-  def download_book(book_row)
-    return if book_row.text.include?('This title is unavailable for download and transfer')
-
-    book_title = book_row.find('.digital_entity_title').text
-    if already_downloaded?(book_title) && !disable_idempotency
-      logger.info "Skipping #{book_title}"
-      return
-    end
-
-    logger.info "Downloading #{book_title}..."
-
-    book_row.find('.dropdown_title').click
-    book_row.find('span', text: 'Download & transfer via USB').click
-    find('li', text: device).find('input', visible: false).click
-    find_all('span', text: 'Download').last.click
-    find('#notification-close').click
-  rescue Capybara::ElementNotFound => _e
-    find('span', text: 'Cancel').click if page.text.include?('You do not have any compatible devices')
-    logger.warn "Skipping unavailable: #{book_title}"
-  rescue StandardError => _e
-    logger.error "Download failed: #{ex.message}".ljust(100)
-    session.execute_script('window.location.reload()')
-  end
 
   def sign_in
     return unless username && password
