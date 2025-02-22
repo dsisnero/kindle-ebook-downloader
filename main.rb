@@ -215,29 +215,31 @@ class KindleDownloader
 
     # Navigate through all pages using Next button
     while true
-      # Check if we're stuck or reached the end
-      break if page_urls.last == previous_url || page_urls.size > 500
-      previous_url = page_urls.last
+      begin
+        # Check if we're stuck or reached the end
+        break if page_urls.last == previous_url || page_urls.size > 500
+        previous_url = page_urls.last
 
-      # Attempt to find and click Next button
-      if has_selector?('#page-RIGHT_PAGE', wait: 5)
-        execute_script("document.querySelector('#page-RIGHT_PAGE').click()")
-        
-        # Wait for page load with multiple checks
-        Timeout.timeout(15) do
-          sleep 0.5 until all('.ListItem-module_row__3orql', minimum: 1, wait: 5) &&
-            current_url != page_urls.last
+        # Attempt to find and click Next button
+        if has_selector?('#page-RIGHT_PAGE', wait: 5)
+          execute_script("document.querySelector('#page-RIGHT_PAGE').click()")
+          
+          # Wait for page load with multiple checks
+          Timeout.timeout(15) do
+            sleep 0.5 until all('.ListItem-module_row__3orql', minimum: 1, wait: 5) &&
+              current_url != page_urls.last
+          end
+          
+          page_urls << current_url
+          logger.info "Discovered page #{page_urls.size}"
+        else
+          logger.info "No more pages found"
+          break
         end
-        
-        page_urls << current_url
-        logger.info "Discovered page #{page_urls.size}"
-      else
-        logger.info "No more pages found"
+      rescue => e
+        logger.error "Pagination error: #{e.message}"
         break
       end
-    rescue => e
-      logger.error "Pagination error: #{e.message}"
-      break
     end
 
     logger.info "Collected #{page_urls.size} pages through navigation"
