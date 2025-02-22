@@ -207,16 +207,42 @@ class KindleDownloader
   end
 
   def build_page_cache
-    logger.info "Building page cache with #{@concurrency} threads"
+    logger.info "Building complete page cache"
     
-    # Get all page URLs first using main session
+    # Sequential pagination to collect all page URLs
     page_urls = [current_url]
-    pagination_links = all("[id^='page-']", wait: 10)
-    pagination_links.each { |link| page_urls << link[:href] }
-    page_urls.uniq!
-    logger.info "page count: #{page_urls.count}"
+    previous_url = nil
 
-    # Create completely independent sessions for each thread
+    # Navigate through all pages using Next button
+    while true
+      # Check if we're stuck or reached the end
+      break if page_urls.last == previous_url || page_urls.size > 500
+      previous_url = page_urls.last
+
+      # Attempt to find and click Next button
+      if has_selector?('#page-RIGHT_PAGE', wait: 5)
+        execute_script("document.querySelector('#page-RIGHT_PAGE').click()")
+        
+        # Wait for page load with multiple checks
+        Timeout.timeout(15) do
+          sleep 0.5 until all('.ListItem-module_row__3orql', minimum: 1, wait: 5) &&
+            current_url != page_urls.last
+        end
+        
+        page_urls << current_url
+        logger.info "Discovered page #{page_urls.size}"
+      else
+        logger.info "No more pages found"
+        break
+      end
+    rescue => e
+      logger.error "Pagination error: #{e.message}"
+      break
+    end
+
+    logger.info "Collected #{page_urls.size} pages through navigation"
+
+    # Concurrent processing of discovered pages
     executor = Concurrent::ThreadPoolExecutor.new(
       max_threads: @concurrency,
       max_queue: page_urls.size
@@ -224,17 +250,20 @@ class KindleDownloader
 
     futures = page_urls.map.with_index do |url, index|
       Concurrent::Future.execute(executor: executor) do
-        # Create new independent session
         session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
         
         begin
           logger.info "Processing page #{index + 1}/#{page_urls.size}"
           session.visit(url)
           
+          # Wait for book items to load
+          session.find('.ListItem-module_row__3orql', wait: 10)
+          
           titles = session.all('.ListItem-module_row__3orql').map do |row|
             next if row.text.include?('This title is unavailable')
             
-            title = row.find('.digital_entity_title').text rescue nil
+            title_element = row.find('.digital_entity_title', wait: 5)
+            title = title_element.text.strip rescue nil
             sanitize_title(title) if title
           end.compact
 
@@ -252,12 +281,15 @@ class KindleDownloader
       end
     end
 
+    # Validate and merge results
     page_cache = futures.each_with_object({}) do |future, cache|
       result = future.value
-      cache[result[:page_number]] = result if result
+      if result && result[:titles].any?
+        cache[result[:page_number]] = result
+      end
     end
 
-    logger.info "Built cache for #{page_cache.size}/#{page_urls.size} pages"
+    logger.info "Completed processing #{page_cache.size} valid pages"
     page_cache
   end
 
