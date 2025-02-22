@@ -215,7 +215,6 @@ class KindleDownloader
     pagination_links.each { |link| page_urls << link[:href] }
     page_urls.uniq!
     logger.info "page count: #{page_urls.count}"
-    binding.irb
 
     # Create completely independent sessions for each thread
     executor = Concurrent::ThreadPoolExecutor.new(
