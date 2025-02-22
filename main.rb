@@ -200,10 +200,28 @@ class KindleDownloader
     binding.irb
   end
 
-  def title_from_row(row)
-    return nil if row.text.include?('This title is unavailable for download and transfer')
+  def process_page_content(session)
+    session.all('.ListItem-module_row__3orql').map do |row|
+      next if unavailable_book?(row)
+      
+      title = extract_title(row)
+      sanitize_title(title)
+    end.compact
+  rescue => e
+    logger.error "Content processing error: #{e.message}"
+    []
+  end
 
-    row.find('.digital_entity_title').text
+  def unavailable_book?(row)
+    row.text.include?('This title is unavailable') ||
+    row.text.include?('not available for download')
+  end
+
+  def extract_title(row)
+    row.find('.digital_entity_title', wait: 10).text.strip
+  rescue => e
+    logger.warn "Title extraction failed: #{e.message}"
+    nil
   end
 
   def build_page_cache
@@ -246,7 +264,7 @@ class KindleDownloader
 
     # Concurrent processing of discovered pages
     executor = Concurrent::ThreadPoolExecutor.new(
-      max_threads: [@concurrency, 5].min, # Reduce max concurrency for stability
+      max_threads: [@concurrency, 3].min, # Reduce max concurrency further
       max_queue: page_urls.size
     )
 
@@ -257,26 +275,27 @@ class KindleDownloader
         begin
           logger.info "Processing page #{index + 1}/#{page_urls.size}"
           
-          # Add retry mechanism with backoff
+          # Add more robust retry mechanism
           retries = 0
+          max_retries = 3 # Increased from 2
+          backoff_base = 3 # Increased from 2
+
           begin
             session.visit(url)
             
-            # Wait for either book items or "no results" message
-            session.using_wait_time(30) do
-              if session.has_selector?('.ListItem-module_row__3orql', wait: 30)
-                titles = session.all('.ListItem-module_row__3orql').map do |row|
-                  next if row.text.include?('This title is unavailable')
-                  
-                  title_element = row.find('.digital_entity_title', wait: 5)
-                  title = title_element.text.strip rescue nil
-                  sanitize_title(title) if title
-                end.compact
-              elsif session.has_text?('No items to display', wait: 5)
+            # Improved page load verification
+            session.using_wait_time(45) do
+              # Wait for either content or error messages
+              if session.has_selector?('.ListItem-module_row__3orql', wait: 45)
+                titles = process_page_content(session)
+              elsif session.has_text?('No items to display', wait: 10) || 
+                    session.has_text?('Server Busy', wait: 5)
                 titles = []
-                logger.info "Page #{index + 1} is empty"
+                logger.info "Page #{index + 1} is empty or server busy"
               else
-                raise "Page content not loaded"
+                raise "Page content not loaded - final check: " \
+                      "Title: #{session.title[0..50]}... " \
+                      "URL: #{session.current_url}"
               end
             end
 
@@ -286,10 +305,14 @@ class KindleDownloader
               titles: titles
             }
           rescue => ex
-            if retries < 2
+            if retries < max_retries
               retries += 1
-              logger.warn "Retry #{retries}/2 for page #{index + 1}: #{ex.message}"
-              sleep 2**retries # Exponential backoff
+              wait_time = backoff_base ** retries + rand(1..3) # Add jitter
+              logger.warn "Retry #{retries}/#{max_retries} for page #{index + 1}: " \
+                          "#{ex.message} - Waiting #{wait_time}s"
+              sleep wait_time
+              session.driver.quit # Clean up before retry
+              session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
               retry
             else
               logger.error "Page #{index + 1} failed: #{ex.message}"
