@@ -246,7 +246,7 @@ class KindleDownloader
 
     # Concurrent processing of discovered pages
     executor = Concurrent::ThreadPoolExecutor.new(
-      max_threads: @concurrency,
+      max_threads: [@concurrency, 5].min, # Reduce max concurrency for stability
       max_queue: page_urls.size
     )
 
@@ -256,27 +256,47 @@ class KindleDownloader
         
         begin
           logger.info "Processing page #{index + 1}/#{page_urls.size}"
-          session.visit(url)
           
-          # Wait for book items to load
-          session.find('.ListItem-module_row__3orql', wait: 10)
-          
-          titles = session.all('.ListItem-module_row__3orql').map do |row|
-            next if row.text.include?('This title is unavailable')
+          # Add retry mechanism with backoff
+          retries = 0
+          begin
+            session.visit(url)
             
-            title_element = row.find('.digital_entity_title', wait: 5)
-            title = title_element.text.strip rescue nil
-            sanitize_title(title) if title
-          end.compact
+            # Wait for either book items or "no results" message
+            session.using_wait_time(30) do
+              if session.has_selector?('.ListItem-module_row__3orql', wait: 30)
+                titles = session.all('.ListItem-module_row__3orql').map do |row|
+                  next if row.text.include?('This title is unavailable')
+                  
+                  title_element = row.find('.digital_entity_title', wait: 5)
+                  title = title_element.text.strip rescue nil
+                  sanitize_title(title) if title
+                end.compact
+              elsif session.has_text?('No items to display', wait: 5)
+                titles = []
+                logger.info "Page #{index + 1} is empty"
+              else
+                raise "Page content not loaded"
+              end
+            end
 
-          {
-            page_number: index + 1,
-            url: session.current_url,
-            titles: titles
-          }
-        rescue => ex
-          logger.error "Page #{index + 1} error: #{ex.message}"
-          nil
+            {
+              page_number: index + 1,
+              url: session.current_url,
+              titles: titles
+            }
+          rescue => ex
+            if retries < 2
+              retries += 1
+              logger.warn "Retry #{retries}/2 for page #{index + 1}: #{ex.message}"
+              sleep 2**retries # Exponential backoff
+              retry
+            else
+              logger.error "Page #{index + 1} failed: #{ex.message}"
+              nil
+            end
+          end
+
         ensure
           session.driver.quit
         end
