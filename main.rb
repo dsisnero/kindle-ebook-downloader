@@ -263,7 +263,7 @@ class KindleDownloader
     logger.info "Collected #{page_urls.size} pages through navigation"
 
     # Get cookies from authenticated main session
-    auth_cookies = driver.browser.manage.all_cookies
+    auth_cookies = page.driver.browser.manage.all_cookies
 
     # Concurrent processing of discovered pages
     executor = Concurrent::ThreadPoolExecutor.new(
@@ -381,7 +381,7 @@ class KindleDownloader
     return unless username && password
 
     # Clear existing cookies first
-    driver.browser.manage.delete_all_cookies
+    page.driver.browser.manage.delete_all_cookies
     visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
 
     fill_in('ap_email', with: username)
