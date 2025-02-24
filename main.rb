@@ -1,3 +1,15 @@
+require 'bundler/inline'
+
+gemfile do
+  source 'https://rubygems.org'
+
+  gem 'byebug'
+  gem 'selenium-webdriver'
+  gem 'rotp'
+  gem 'rqrcode'
+  gem 'capybara'
+  gem 'concurrent-ruby'
+end
 require 'optparse'
 require 'ostruct'
 require 'timeout'
@@ -112,7 +124,7 @@ class KindleDownloader
 
   def sanitize_title(title)
     return '' unless title
-    
+
     title.downcase
          .gsub(/[^a-z0-9\s]/, '') # Remove special chars except spaces/numbers
          .gsub(/\s+/, '_')        # Convert spaces to underscores
@@ -128,10 +140,10 @@ class KindleDownloader
 
   def attempt_download(clean_title)
     visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
-    
+
     # Find the specific book row using the cached title
     book_row = find('.digital_entity_title', text: /#{Regexp.escape(clean_title)}/i)
-                            .ancestor('.ListItem-module_row__3orql')
+               .ancestor('.ListItem-module_row__3orql')
 
     book_row.find('.dropdown_title').click
     book_row.find('span', text: 'Download & transfer via USB').click
@@ -140,7 +152,7 @@ class KindleDownloader
     find('#notification-close').click
   rescue Capybara::ElementNotFound => e
     logger.warn "Skipping unavailable: #{clean_title}"
-  rescue => e
+  rescue StandardError => e
     logger.error "Retrying #{clean_title}: #{e.message}"
     page.execute_script('window.location.reload()')
     retry
@@ -150,12 +162,13 @@ class KindleDownloader
     visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
     sign_in
     @page_cache = build_page_cache # Store in instance variable
+    binding.irb
     process_cache_concurrently
   end
 
   def process_cache_concurrently
     logger.info "Starting concurrent processing of #{@page_cache.size} pages"
-    
+
     executor = Concurrent::ThreadPoolExecutor.new(
       max_threads: @concurrency,
       max_queue: @page_cache.size
@@ -164,16 +177,15 @@ class KindleDownloader
     # Process all titles from cache instead of visiting pages again
     futures = @page_cache.values.flat_map do |page_data|
       page_data[:titles].map do |clean_title|
+        binding.irb
         Concurrent::Future.execute(executor: executor) do
           next if book_downloaded?(clean_title) && !disable_idempotency
 
           Capybara.using_session("download-#{clean_title}") do
-            begin
-              logger.info "Downloading #{clean_title}"
-              attempt_download(clean_title)
-            rescue => ex
-              logger.error "Failed to download #{clean_title}: #{ex.message}"
-            end
+            logger.info "Downloading #{clean_title}"
+            attempt_download(clean_title)
+          rescue StandardError => e
+            logger.error "Failed to download #{clean_title}: #{e.message}"
           end
         end
       end
@@ -203,30 +215,30 @@ class KindleDownloader
   def process_page_content(session)
     session.all('.ListItem-module_row__3orql').map do |row|
       next if unavailable_book?(row)
-      
+
       title = extract_title(row)
       sanitize_title(title)
     end.compact
-  rescue => e
+  rescue StandardError => e
     logger.error "Content processing error: #{e.message}"
     []
   end
 
   def unavailable_book?(row)
     row.text.include?('This title is unavailable') ||
-    row.text.include?('not available for download')
+      row.text.include?('not available for download')
   end
 
   def extract_title(row)
     row.find('.digital_entity_title', wait: 10).text.strip
-  rescue => e
+  rescue StandardError => e
     logger.warn "Title extraction failed: #{e.message}"
     nil
   end
 
   def build_page_cache
-    logger.info "Building complete page cache"
-    
+    logger.info 'Building complete page cache'
+
     # Sequential pagination to collect all page URLs
     page_urls = [current_url]
     previous_url = nil
@@ -236,25 +248,26 @@ class KindleDownloader
       begin
         # Check if we're stuck or reached the end
         break if page_urls.last == previous_url || page_urls.size > 500
+
         previous_url = page_urls.last
 
         # Attempt to find and click Next button
         if has_selector?('#page-RIGHT_PAGE', wait: 5)
           execute_script("document.querySelector('#page-RIGHT_PAGE').click()")
-          
+
           # Wait for page load with multiple checks
           Timeout.timeout(15) do
             sleep 0.5 until all('.ListItem-module_row__3orql', minimum: 1, wait: 5) &&
-              current_url != page_urls.last
+                            current_url != page_urls.last
           end
-          
+
           page_urls << current_url
           logger.info "Discovered page #{page_urls.size}"
         else
-          logger.info "No more pages found"
+          logger.info 'No more pages found'
           break
         end
-      rescue => e
+      rescue StandardError => e
         logger.error "Pagination error: #{e.message}"
         break
       end
@@ -267,19 +280,26 @@ class KindleDownloader
 
     # Concurrent processing of discovered pages
     executor = Concurrent::ThreadPoolExecutor.new(
-      max_threads: [@concurrency, 2].min, # Further reduce to 2 threads
+      max_threads: [@concurrency, 10].min, # Further reduce to 2 threads
       max_queue: page_urls.size
     )
 
+    logger.info 'about to execute urls with futures'
+
     futures = page_urls.map.with_index do |url, index|
-      Concurrent::Future.execute(executor: executor) do
+      Concurrent::Future.execute(executor: executor, args: [url, index]) do |u, idx|
+        url = u
+        index = idx
         session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
-        
         begin
+          logger.info 'In futures code to get session'
+          session.visit('https://www.amazon.com')
+          # sessing.driver.maximize_window  #  need handle
           # Share authentication cookies with new session
-          auth_cookies.each { |cookie| session.driver.browser.manage.add_cookie(cookie) }
-          session.visit(url)
-          session.refresh # Reload page with cookies
+          auth_cookies.select do |c|
+            c[:domain] = '.amazon.com'
+          end.each { |cookie| session.driver.browser.manage.add_cookie(cookie) }
+          session.refresh
 
           # Add authentication check
           if session.has_selector?('#ap_signin', wait: 5)
@@ -288,29 +308,28 @@ class KindleDownloader
           end
 
           logger.info "Processing page #{index + 1}/#{page_urls.size}"
-          
+
           # Add more robust retry mechanism
           retries = 0
           max_retries = 3 # Increased from 2
           backoff_base = 3 # Increased from 2
 
           begin
+            logger.info "visiting url: #{url}"
             session.visit(url)
-            
-            # Improved page load verification
-            session.using_wait_time(45) do
+            if session.find('.ListItem-module_row__3orql', wait: 10)
+              # Improved page load verification
               # Wait for either content or error messages
-              if session.has_selector?('.ListItem-module_row__3orql', wait: 45)
-                titles = process_page_content(session)
-              elsif session.has_text?('No items to display', wait: 10) || 
-                    session.has_text?('Server Busy', wait: 5)
-                titles = []
-                logger.info "Page #{index + 1} is empty or server busy"
-              else
-                raise "Page content not loaded - final check: " \
-                      "Title: #{session.title[0..50]}... " \
-                      "URL: #{session.current_url}"
-              end
+              logger.info 'entering process_page_content'
+              titles = process_page_content(session)
+            elsif session.has_text?('No items to display', wait: 10) ||
+                  session.has_text?('Server Busy', wait: 5)
+              titles = []
+              logger.info "Page #{index + 1} is empty or server busy"
+            else
+              raise 'Page content not loaded - final check: ' \
+                    "Title: #{session.title[0..50]}... " \
+                    "URL: #{session.current_url}"
             end
 
             {
@@ -318,28 +337,27 @@ class KindleDownloader
               url: session.current_url,
               titles: titles
             }
-          rescue => ex
+          rescue StandardError => e
             # Add specific authentication error handling
-            if ex.message.include?('SignIn')
+            if e.message.include?('SignIn')
               logger.error "Authentication failed for page #{index + 1}"
               next
             end
-            
+
             if retries < max_retries
               retries += 1
-              wait_time = backoff_base ** retries + rand(1..3) # Add jitter
+              wait_time = backoff_base**retries + rand(1..3) # Add jitter
               logger.warn "Retry #{retries}/#{max_retries} for page #{index + 1}: " \
-                          "#{ex.message} - Waiting #{wait_time}s"
+                          "#{e.message} - Waiting #{wait_time}s"
               sleep wait_time
               session.driver.quit # Clean up before retry
               session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
               retry
             else
-              logger.error "Page #{index + 1} failed: #{ex.message}"
+              logger.error "Page #{index + 1} failed: #{e.message}"
               nil
             end
           end
-
         ensure
           session.driver.quit
         end
@@ -349,9 +367,7 @@ class KindleDownloader
     # Validate and merge results
     page_cache = futures.each_with_object({}) do |future, cache|
       result = future.value
-      if result && result[:titles].any?
-        cache[result[:page_number]] = result
-      end
+      cache[result[:page_number]] = result if result && result[:titles].any?
     end
 
     logger.info "Completed processing #{page_cache.size} valid pages"
@@ -375,8 +391,6 @@ class KindleDownloader
     find_all('.ListItem-module_row__3orql').each(&block)
   end
 
-
-
   def sign_in
     return unless username && password
 
@@ -392,7 +406,7 @@ class KindleDownloader
     handle_totp_verification if has_selector?('#auth-mfa-otpcode', wait: 10)
 
     find('#nav-tools', wait: 10) # Wait for login completion
-    
+
     # Verify successful authentication
     raise 'Authentication failed' if has_selector?('#auth-error-message-box', wait: 5)
   end
