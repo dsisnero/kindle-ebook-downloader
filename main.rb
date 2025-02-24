@@ -262,9 +262,12 @@ class KindleDownloader
 
     logger.info "Collected #{page_urls.size} pages through navigation"
 
+    # Get cookies from authenticated main session
+    auth_cookies = driver.browser.manage.all_cookies
+
     # Concurrent processing of discovered pages
     executor = Concurrent::ThreadPoolExecutor.new(
-      max_threads: [@concurrency, 3].min, # Reduce max concurrency further
+      max_threads: [@concurrency, 2].min, # Further reduce to 2 threads
       max_queue: page_urls.size
     )
 
@@ -273,6 +276,17 @@ class KindleDownloader
         session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
         
         begin
+          # Share authentication cookies with new session
+          auth_cookies.each { |cookie| session.driver.browser.manage.add_cookie(cookie) }
+          session.visit(url)
+          session.refresh # Reload page with cookies
+
+          # Add authentication check
+          if session.has_selector?('#ap_signin', wait: 5)
+            logger.error "Session lost authentication on page #{index + 1}"
+            next
+          end
+
           logger.info "Processing page #{index + 1}/#{page_urls.size}"
           
           # Add more robust retry mechanism
@@ -305,6 +319,12 @@ class KindleDownloader
               titles: titles
             }
           rescue => ex
+            # Add specific authentication error handling
+            if ex.message.include?('SignIn')
+              logger.error "Authentication failed for page #{index + 1}"
+              next
+            end
+            
             if retries < max_retries
               retries += 1
               wait_time = backoff_base ** retries + rand(1..3) # Add jitter
@@ -360,6 +380,10 @@ class KindleDownloader
   def sign_in
     return unless username && password
 
+    # Clear existing cookies first
+    driver.browser.manage.delete_all_cookies
+    visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
+
     fill_in('ap_email', with: username)
     fill_in('ap_password', with: password)
     click_button('signInSubmit')
@@ -368,6 +392,9 @@ class KindleDownloader
     handle_totp_verification if has_selector?('#auth-mfa-otpcode', wait: 10)
 
     find('#nav-tools', wait: 10) # Wait for login completion
+    
+    # Verify successful authentication
+    raise 'Authentication failed' if has_selector?('#auth-error-message-box', wait: 5)
   end
 
   def handle_totp_verification
