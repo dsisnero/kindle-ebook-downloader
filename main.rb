@@ -54,28 +54,28 @@ OptionParser.new do |opts|
   end
 
   opts.on('-pPASSWORD', '--password=PASSWORD',
-          "Amazon Password, defaults to the AMAZON_PASSWORD environment variable (#{options[:password]})") do |password|
-    options[:password] = password
-  end
+    "Amazon Password, defaults to the AMAZON_PASSWORD environment variable (#{options[:password]})") do |password|
+      options[:password] = password
+    end
 
   opts.on('-dDEVICE', '--device=DEVICE', 'Kindle Device') do |device|
     options[:device] = device
   end
 
   opts.on('-p', '--path=DOWNLOAD_PATH',
-          "Where to store downloaded books, default: '#{options[:download_path]}'") do |download_path|
-    options[:download_path] = download_path
-  end
+    "Where to store downloaded books, default: '#{options[:download_path]}'") do |download_path|
+      options[:download_path] = download_path
+    end
 
   opts.on('--disable-idempotency',
-          'Download every book regardless of if it has already been downloaded.') do |_disable_idempotency|
-    options[:disable_idempotency] = true
-  end
+    'Download every book regardless of if it has already been downloaded.') do |_disable_idempotency|
+      options[:disable_idempotency] = true
+    end
 
   opts.on('-cCONCURRENCY', '--concurrency=CONCURRENCY', Integer,
-          'Number of concurrent downloads (default: 3)') do |c|
-    options[:concurrency] = c
-  end
+    'Number of concurrent downloads (default: 3)') do |c|
+      options[:concurrency] = c
+    end
 
   opts.on('--headless', 'Run browser in headless mode') do
     options[:headless] = true
@@ -104,8 +104,8 @@ class KindleDownloader
   include Capybara::DSL
 
   def initialize(download_path:, username: nil, password: nil, device: nil,
-                 disable_idempotency: false, totp_secret: nil, clean_debug: false, concurrency: 3, max_pages: 500,
-                 headless: false)
+    disable_idempotency: false, totp_secret: nil, clean_debug: false, concurrency: 3, max_pages: 500,
+    headless: false)
     self.username = username
     self.password = password
     self.device = device
@@ -120,7 +120,7 @@ class KindleDownloader
     @totp = totp_secret ? ROTP::TOTP.new(totp_secret) : nil
     @valid_page_selector = nil
     self.headless = headless
-    
+
     # Create index file for tracking downloads
     @index_file = File.join(download_path, '.download_index')
     File.write(@index_file, '') unless File.exist?(@index_file)
@@ -139,10 +139,10 @@ class KindleDownloader
     return '' unless title
 
     title.downcase
-         .gsub(/[^a-z0-9\s]/, '') # Remove special chars except spaces/numbers
-         .gsub(/\s+/, '_')        # Convert spaces to underscores
-         .gsub(/_+/, '_')         # Remove duplicate underscores
-         .chomp('_')
+      .gsub(/[^a-z0-9\s]/, '') # Remove special chars except spaces/numbers
+      .gsub(/\s+/, '_')        # Convert spaces to underscores
+      .gsub(/_+/, '_')         # Remove duplicate underscores
+      .chomp('_')
   end
 
   def book_downloaded?(clean_title)
@@ -150,11 +150,11 @@ class KindleDownloader
       # Check both filesystem and index
       file_exists = Dir.glob("#{download_path}/#{clean_title}.*").any?
       index_contains = File.readlines(@index_file).grep(/^#{Regexp.escape(clean_title)}::/).any?
-      
+
       file_exists || index_contains
     end
   end
-  
+
   def record_download(clean_title)
     @cache_mutex.synchronize do
       File.open(@index_file, 'a') do |f|
@@ -183,8 +183,8 @@ class KindleDownloader
   #   retry
   # end
   def attempt_download(session, row, title, clean_title)
-    try = 0
     begin
+      try = 0
       logger.info "Downloading #{title}"
       row.find('.dropdown_title').click
       row.find('span', text: 'Download & transfer via USB').click
@@ -195,48 +195,43 @@ class KindleDownloader
       download_button.click
 
       # Wait for notification overlay to appear fully
-      begin
-        session.wait_until(15) do
-          session.has_selector?('#notification-close', visible: true)
-        end
-      rescue => e
-        logger.error "has_selector error\n#{e.message}"
-        nil
-      end
+    rescue => e
+      logger.error "has_selector error\n#{e.message}"
+      nil
+    end
 
-      # Try multiple strategies to close the notification
-      close_notification(session)
-      
-      # Return true to indicate successful download attempt
-      true
-    rescue Capybara::ElementNotFound => e
-      logger.warn "Skipping unavailable: #{clean_title}"
+    # Try multiple strategies to close the notification
+    close_notification(session)
+
+    # Return true to indicate successful download attempt
+    true
+  rescue Capybara::ElementNotFound => e
+    logger.warn "Skipping unavailable: #{clean_title}"
+    @cache_mutex.synchronize do
+      File.open('attempt_download.html', 'w') { |f| f.write(page.html) }
+      File.open('attempt_download_ex', 'w') { |f| f.write e.message }
+    end
+    nil
+  rescue StandardError => e
+    if try += 1 > 3
       @cache_mutex.synchronize do
         File.open('attempt_download.html', 'w') { |f| f.write(page.html) }
         File.open('attempt_download_ex', 'w') { |f| f.write e.message }
       end
+
+      # Clean up any partial downloads
+      clean_partial_downloads(clean_title)
       nil
-    rescue StandardError => e
-      if try += 1 > 3
-        @cache_mutex.synchronize do
-          File.open('attempt_download.html', 'w') { |f| f.write(page.html) }
-          File.open('attempt_download_ex', 'w') { |f| f.write e.message }
-        end
-        
-        # Clean up any partial downloads
-        clean_partial_downloads(clean_title)
-        nil
-      else
-        page.execute_script('window.location.reload()')
-        logger.error "Retrying #{clean_title}: #{e.message}"
-        retry
-      end
+    else
+      page.execute_script('window.location.reload()')
+      logger.error "Retrying #{clean_title}: #{e.message}"
+      retry
     end
   end
-  
+
   def clean_partial_downloads(clean_title)
     require 'fileutils'
-    
+
     @cache_mutex.synchronize do
       Dir.glob("#{download_path}/#{clean_title}.*").each do |f|
         if File.size(f) < 1024 # Less than 1KB is likely incomplete
@@ -250,7 +245,7 @@ class KindleDownloader
   def close_notification(session)
     # Strategy 1: Direct click with visibility check
     logger.info "Attempting close_notification"
-    if session.has_selector?('#notification-close', visible: true, wait: 5)
+    if session.has_selector?('#notification-close', visible: true, wait: 10)
       session.find('#notification-close').click
       return
     end
@@ -263,7 +258,7 @@ class KindleDownloader
     # Strategy 3: Handle potential overlay
     if session.has_selector?('.DeviceDialogBox-module_backdrop__2sS8F', wait: 2)
       session.execute_script(<<~JS)
-        document.querySelector('.DeviceDialogBox-module_backdrop__2sS8F').style.display = 'none'
+      document.querySelector('.DeviceDialogBox-module_backdrop__2sS8F').style.display = 'none'
       JS
       session.find('#notification-close').click
     end
@@ -278,14 +273,14 @@ class KindleDownloader
   def download_ebooks
     visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
     sign_in
-    
+
     # Rebuild index if requested
     rebuild_download_index if disable_idempotency
-    
+
     @page_urls = get_page_urls # Store in instance variable
     process_urls(page_urls)
   end
-  
+
   def rebuild_download_index
     logger.info "Rebuilding download index due to disable_idempotency flag"
     @cache_mutex.synchronize do
@@ -350,7 +345,7 @@ class KindleDownloader
         logger.info("Skipping already downloaded: #{clean_title}")
         next
       end
-      
+
       result = attempt_download(session, row, title, clean_title)
       record_download(clean_title) if result
       result
@@ -362,7 +357,7 @@ class KindleDownloader
 
   def unavailable_book?(row)
     row.text.include?('This title is unavailable') ||
-      row.text.include?('not available for download')
+    row.text.include?('not available for download')
   end
 
   def extract_title(row)
@@ -394,7 +389,7 @@ class KindleDownloader
           # Wait for page load with multiple checks
           Timeout.timeout(15) do
             sleep 0.5 until all('.ListItem-module_row__3orql', minimum: 1, wait: 5) &&
-                            current_url != page_urls.last
+            current_url != page_urls.last
           end
 
           page_urls << current_url
@@ -431,14 +426,14 @@ class KindleDownloader
       Concurrent::Future.execute(executor: executor, args: [url, index]) do |u, idx|
         url = u
         index = idx
+        begin
 
-        session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
-        begin
-          session.driver.browser.manage.window.maximize
-        rescue StandardError
-          nil
-        end
-        begin
+          session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
+          begin
+            session.driver.browser.manage.window.maximize
+          rescue StandardError
+            nil
+          end
           logger.info 'In futures code to get session'
           session.visit('https://www.amazon.com')
           # sessing.driver.maximize_window  #  need handle
@@ -468,13 +463,13 @@ class KindleDownloader
               logger.info 'entering process_page_content'
               titles = process_page_content(session)
             elsif session.has_text?('No items to display', wait: 10) ||
-                  session.has_text?('Server Busy', wait: 5)
+              session.has_text?('Server Busy', wait: 5)
               titles = []
               logger.info "Page #{index + 1} is empty or server busy"
             else
               raise 'Page content not loaded - final check: ' \
-                    "Title: #{session.title[0..50]}... " \
-                    "URL: #{session.current_url}"
+                "Title: #{session.title[0..50]}... " \
+                "URL: #{session.current_url}"
             end
 
             {
@@ -493,7 +488,7 @@ class KindleDownloader
               retries += 1
               wait_time = backoff_base**retries + rand(1..3) # Add jitter
               logger.warn "Retry #{retries}/#{max_retries} for page #{index + 1}: " \
-                          "#{e.message} - Waiting #{wait_time}s"
+                "#{e.message} - Waiting #{wait_time}s"
               sleep wait_time
               session.driver.quit # Clean up before retry
               session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
@@ -503,33 +498,36 @@ class KindleDownloader
               nil
             end
           end
+        rescue => e
+          log.error "Error in process urls\n#{e.message}"
+          puts e.message
         ensure
           session.driver.quit
         end
       end
-    end
+      # Validate and merge results
+      page_cache = futures.each_with_object({}) do |future, cache|
+        result = future.value
+        cache[result[:page_number]] = result if result && result[:titles].any?
+      end
 
-    # Validate and merge results
-    page_cache = futures.each_with_object({}) do |future, cache|
-      result = future.value
-      cache[result[:page_number]] = result if result && result[:titles].any?
-    end
-
-    logger.info "Completed processing #{page_cache.size} valid pages"
-    page_cache
-  end
-
-  def next_page(page_number)
-    return 2 if page_number == 1
-
-    if page_sel = find("#page-#{page_number}")
-      page_sel.click
-      page_number + 1
-    else
-      false
+      logger.info "Completed processing #{page_cache.size} valid pages"
+      page_cache
     end
   end
 
+
+  # def next_page(page_number)
+  #   return 2 if page_number == 1
+  #
+  #   if page_sel = find("#page-#{page_number}")
+  #     page_sel.click
+  #     page_number + 1
+  #   else
+  #     false
+  #   end
+  # end
+  #
   def book_rows(&block)
     return to_enum(__callee__) unless block_given?
 
