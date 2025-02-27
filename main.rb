@@ -120,6 +120,10 @@ class KindleDownloader
     @totp = totp_secret ? ROTP::TOTP.new(totp_secret) : nil
     @valid_page_selector = nil
     self.headless = headless
+    
+    # Create index file for tracking downloads
+    @index_file = File.join(download_path, '.download_index')
+    File.write(@index_file, '') unless File.exist?(@index_file)
 
     log_path = File.join(download_path, 'kindle_downloader.log')
     File.delete(log_path) if clean_debug && File.exist?(log_path)
@@ -143,7 +147,19 @@ class KindleDownloader
 
   def book_downloaded?(clean_title)
     @cache_mutex.synchronize do
-      Dir.glob("#{download_path}/#{clean_title}.*").any?
+      # Check both filesystem and index
+      file_exists = Dir.glob("#{download_path}/#{clean_title}.*").any?
+      index_contains = File.readlines(@index_file).grep(/^#{Regexp.escape(clean_title)}::/).any?
+      
+      file_exists || index_contains
+    end
+  end
+  
+  def record_download(clean_title)
+    @cache_mutex.synchronize do
+      File.open(@index_file, 'a') do |f|
+        f.puts "#{clean_title}::#{Time.now.utc.iso8601}"
+      end
     end
   end
 
@@ -169,7 +185,7 @@ class KindleDownloader
   def attempt_download(session, row, title, clean_title)
     try = 0
     begin
-      logger.info "downloading #{title}"
+      logger.info "Downloading #{title}"
       row.find('.dropdown_title').click
       row.find('span', text: 'Download & transfer via USB').click
       row.find('li', text: device).find('input', visible: false).click
@@ -180,16 +196,19 @@ class KindleDownloader
 
       # Wait for notification overlay to appear fully
       begin
-      session.wait_until(15) do
-        session.has_selector?('#notification-close', visible: true)
-      end
+        session.wait_until(15) do
+          session.has_selector?('#notification-close', visible: true)
+        end
       rescue => e
-      logger.error "has_selector er\n#{e.message}"
-      nil
+        logger.error "has_selector error\n#{e.message}"
+        nil
       end
 
       # Try multiple strategies to close the notification
       close_notification(session)
+      
+      # Return true to indicate successful download attempt
+      true
     rescue Capybara::ElementNotFound => e
       logger.warn "Skipping unavailable: #{clean_title}"
       @cache_mutex.synchronize do
@@ -203,11 +222,27 @@ class KindleDownloader
           File.open('attempt_download.html', 'w') { |f| f.write(page.html) }
           File.open('attempt_download_ex', 'w') { |f| f.write e.message }
         end
+        
+        # Clean up any partial downloads
+        clean_partial_downloads(clean_title)
         nil
       else
         page.execute_script('window.location.reload()')
         logger.error "Retrying #{clean_title}: #{e.message}"
         retry
+      end
+    end
+  end
+  
+  def clean_partial_downloads(clean_title)
+    require 'fileutils'
+    
+    @cache_mutex.synchronize do
+      Dir.glob("#{download_path}/#{clean_title}.*").each do |f|
+        if File.size(f) < 1024 # Less than 1KB is likely incomplete
+          FileUtils.rm_f(f)
+          logger.warn("Removed incomplete file: #{f}")
+        end
       end
     end
   end
@@ -243,9 +278,20 @@ class KindleDownloader
   def download_ebooks
     visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
     sign_in
+    
+    # Rebuild index if requested
+    rebuild_download_index if disable_idempotency
+    
     @page_urls = get_page_urls # Store in instance variable
     process_urls(page_urls)
-    # process_cache_concurrently
+  end
+  
+  def rebuild_download_index
+    logger.info "Rebuilding download index due to disable_idempotency flag"
+    @cache_mutex.synchronize do
+      File.delete(@index_file) if File.exist?(@index_file)
+      File.write(@index_file, '')
+    end
   end
 
   # def process_cache_concurrently
@@ -300,11 +346,14 @@ class KindleDownloader
 
       title = extract_title(row)
       clean_title = sanitize_title(title)
-      if book_downloaded?(clean_title)
-        logger.info("skipping already downloaded #{clean_title}")
+      if book_downloaded?(clean_title) && !disable_idempotency
+        logger.info("Skipping already downloaded: #{clean_title}")
         next
       end
-      attempt_download(session, row, title, clean_title)
+      
+      result = attempt_download(session, row, title, clean_title)
+      record_download(clean_title) if result
+      result
     end.compact
   rescue StandardError => e
     logger.error "Content processing error: #{e.message}"
