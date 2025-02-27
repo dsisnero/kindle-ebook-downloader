@@ -4,6 +4,8 @@ gemfile do
   source 'https://rubygems.org'
 
   gem 'byebug'
+  gem 'launchy'
+  gem 'ostruct'
   gem 'selenium-webdriver'
   gem 'rotp'
   gem 'rqrcode'
@@ -41,7 +43,7 @@ options = {
   device: ENV['AMAZON_DEVICE'],
   totp_secret: ENV['AMAZON_TOTP_SECRET'],
   concurrency: 10,
-  headless: false
+  headless: true
 }
 
 OptionParser.new do |opts|
@@ -79,9 +81,14 @@ OptionParser.new do |opts|
     options[:headless] = true
   end
 
+  opts.on('--max-pages', 'Return only up to max pages') do |p|
+    options[:max_pages] = p
+  end
+
   opts.on('--debug', 'Enable debug mode (forces headless)') do
     options[:clean_debug] = true
-    options[:headless] = true
+    options[:headless] = false
+    options[:max_pages] = 4
   end
 
   opts.on('-h', '--help', 'Print this help') do
@@ -91,18 +98,20 @@ OptionParser.new do |opts|
 end.parse!
 
 class KindleDownloader
-  attr_accessor :username, :password, :device, :download_path, :disable_idempotency, :headless, :logger
+  attr_accessor :username, :password, :device, :download_path, :disable_idempotency, :headless, :logger, :max_pages
+  attr_reader :page_urls
 
   include Capybara::DSL
 
   def initialize(download_path:, username: nil, password: nil, device: nil,
-                 disable_idempotency: false, totp_secret: nil, clean_debug: false, concurrency: 3,
+                 disable_idempotency: false, totp_secret: nil, clean_debug: false, concurrency: 3, max_pages: 500,
                  headless: false)
     self.username = username
     self.password = password
     self.device = device
     self.download_path = download_path
     self.disable_idempotency = disable_idempotency
+    self.max_pages = max_pages
     @clean_debug = clean_debug
     @concurrency = concurrency
     @page_cache = {}
@@ -138,86 +147,164 @@ class KindleDownloader
     end
   end
 
-  def attempt_download(clean_title)
-    visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
+  # def attempt_download(clean_title)
+  #   visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
 
-    # Find the specific book row using the cached title
-    book_row = find('.digital_entity_title', text: /#{Regexp.escape(clean_title)}/i)
-               .ancestor('.ListItem-module_row__3orql')
+  #   # Find the specific book row using the cached title
+  #   book_row = find('.digital_entity_title', text: /#{Regexp.escape(clean_title)}/i)
+  #              .ancestor('.ListItem-module_row__3orql')
 
-    book_row.find('.dropdown_title').click
-    book_row.find('span', text: 'Download & transfer via USB').click
-    find('li', text: device).find('input', visible: false).click
-    find_all('span', text: 'Download').last.click
-    find('#notification-close').click
-  rescue Capybara::ElementNotFound => e
-    logger.warn "Skipping unavailable: #{clean_title}"
+  #   book_row.find('.dropdown_title').click
+  #   book_row.find('span', text: 'Download & transfer via USB').click
+  #   find('li', text: device).find('input', visible: false).click
+  #   find_all('span', text: 'Download').last.click
+  #   find('#notification-close').click
+  # rescue Capybara::ElementNotFound => e
+  #   logger.warn "Skipping unavailable: #{clean_title}"
+  # rescue StandardError => e
+  #   logger.error "Retrying #{clean_title}: #{e.message}"
+  #   page.execute_script('window.location.reload()')
+  #   retry
+  # end
+  def attempt_download(session, row, title, clean_title)
+    try = 0
+    begin
+      logger.info "downloading #{title}"
+      row.find('.dropdown_title').click
+      row.find('span', text: 'Download & transfer via USB').click
+      row.find('li', text: device).find('input', visible: false).click
+
+      # Click download and wait for popup
+      download_button = row.all('span', text: 'Download').last
+      download_button.click
+
+      # Wait for notification overlay to appear fully
+      begin
+      session.wait_until(15) do
+        session.has_selector?('#notification-close', visible: true)
+      end
+      rescue => e
+      logger.error "has_selector er\n#{e.message}"
+      nil
+      end
+
+      # Try multiple strategies to close the notification
+      close_notification(session)
+    rescue Capybara::ElementNotFound => e
+      logger.warn "Skipping unavailable: #{clean_title}"
+      @cache_mutex.synchronize do
+        File.open('attempt_download.html', 'w') { |f| f.write(page.html) }
+        File.open('attempt_download_ex', 'w') { |f| f.write e.message }
+      end
+      nil
+    rescue StandardError => e
+      if try += 1 > 3
+        @cache_mutex.synchronize do
+          File.open('attempt_download.html', 'w') { |f| f.write(page.html) }
+          File.open('attempt_download_ex', 'w') { |f| f.write e.message }
+        end
+        nil
+      else
+        page.execute_script('window.location.reload()')
+        logger.error "Retrying #{clean_title}: #{e.message}"
+        retry
+      end
+    end
+  end
+
+  def close_notification(session)
+    # Strategy 1: Direct click with visibility check
+    logger.info "Attempting close_notification"
+    if session.has_selector?('#notification-close', visible: true, wait: 5)
+      session.find('#notification-close').click
+      return
+    end
+
+    # Strategy 2: JavaScript click (bypass visibility checks)
+    session.execute_script(
+      "document.querySelector('#notification-close').click()"
+    )
+
+    # Strategy 3: Handle potential overlay
+    if session.has_selector?('.DeviceDialogBox-module_backdrop__2sS8F', wait: 2)
+      session.execute_script(<<~JS)
+        document.querySelector('.DeviceDialogBox-module_backdrop__2sS8F').style.display = 'none'
+      JS
+      session.find('#notification-close').click
+    end
+
+    # Final verification
+    session.wait_until { !session.has_selector?('#notification-close', visible: true) }
   rescue StandardError => e
-    logger.error "Retrying #{clean_title}: #{e.message}"
-    page.execute_script('window.location.reload()')
-    retry
+    session.refresh # Nuclear option if all else fails
+    raise "Failed to close notification: #{e.message}"
   end
 
   def download_ebooks
     visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
     sign_in
-    @page_cache = build_page_cache # Store in instance variable
-    binding.irb
-    process_cache_concurrently
+    @page_urls = get_page_urls # Store in instance variable
+    process_urls(page_urls)
+    # process_cache_concurrently
   end
 
-  def process_cache_concurrently
-    logger.info "Starting concurrent processing of #{@page_cache.size} pages"
+  # def process_cache_concurrently
+  #   logger.info "Starting concurrent processing of #{@page_cache.size} pages"
 
-    executor = Concurrent::ThreadPoolExecutor.new(
-      max_threads: @concurrency,
-      max_queue: @page_cache.size
-    )
+  #   executor = Concurrent::ThreadPoolExecutor.new(
+  #     max_threads: @concurrency,
+  #     max_queue: @page_cache.size
+  #   )
 
-    # Process all titles from cache instead of visiting pages again
-    futures = @page_cache.values.flat_map do |page_data|
-      page_data[:titles].map do |clean_title|
-        binding.irb
-        Concurrent::Future.execute(executor: executor) do
-          next if book_downloaded?(clean_title) && !disable_idempotency
+  #   # Process all titles from cache instead of visiting pages again
+  #   futures = @page_cache.values.flat_map do |page_data|
+  #     page_data[:titles].map do |clean_title|
+  #       binding.irb
+  #       Concurrent::Future.execute(executor: executor) do
+  #         next if book_downloaded?(clean_title) && !disable_idempotency
 
-          Capybara.using_session("download-#{clean_title}") do
-            logger.info "Downloading #{clean_title}"
-            attempt_download(clean_title)
-          rescue StandardError => e
-            logger.error "Failed to download #{clean_title}: #{e.message}"
-          end
-        end
-      end
-    end
+  #         Capybara.using_session("download-#{clean_title}") do
+  #           logger.info "Downloading #{clean_title}"
+  #           attempt_download(clean_title)
+  #         rescue StandardError => e
+  #           logger.error "Failed to download #{clean_title}: #{e.message}"
+  #         end
+  #       end
+  #     end
+  #   end
 
-    futures.each(&:value)
-  ensure
-    executor&.shutdown
-  end
+  #   futures.each(&:value)
+  # ensure
+  #   executor&.shutdown
+  # end
 
-  def do_download_ebooks
-    visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
-    sign_in
-    build_page_cache
+  # def do_download_ebooks
+  #   visit('/hz/mycd/digital-console/contentlist/booksPurchases/titleAsc/')
+  #   sign_in
+  #   build_page_cache
 
-    page_number = 1
+  #   page_number = 1
 
-    loop do
-      page_number = next_page(page_number)
+  #   loop do
+  #     page_number = next_page(page_number)
 
-      download_page
-    end
-  ensure
-    binding.irb
-  end
+  #     download_page
+  #   end
+  # ensure
+  #   binding.irb
+  # end
 
   def process_page_content(session)
     session.all('.ListItem-module_row__3orql').map do |row|
       next if unavailable_book?(row)
 
       title = extract_title(row)
-      sanitize_title(title)
+      clean_title = sanitize_title(title)
+      if book_downloaded?(clean_title)
+        logger.info("skipping already downloaded #{clean_title}")
+        next
+      end
+      attempt_download(session, row, title, clean_title)
     end.compact
   rescue StandardError => e
     logger.error "Content processing error: #{e.message}"
@@ -236,8 +323,8 @@ class KindleDownloader
     nil
   end
 
-  def build_page_cache
-    logger.info 'Building complete page cache'
+  def get_page_urls
+    logger.info 'Getting page urls'
 
     # Sequential pagination to collect all page URLs
     page_urls = [current_url]
@@ -247,7 +334,7 @@ class KindleDownloader
     while true
       begin
         # Check if we're stuck or reached the end
-        break if page_urls.last == previous_url || page_urls.size > 500
+        break if page_urls.last == previous_url || page_urls.size >= max_pages
 
         previous_url = page_urls.last
 
@@ -274,6 +361,11 @@ class KindleDownloader
     end
 
     logger.info "Collected #{page_urls.size} pages through navigation"
+    page_urls
+  end
+
+  def process_urls(urls)
+    logger.info "processing #{urls.count} urls"
 
     # Get cookies from authenticated main session
     auth_cookies = page.driver.browser.manage.all_cookies
@@ -286,11 +378,17 @@ class KindleDownloader
 
     logger.info 'about to execute urls with futures'
 
-    futures = page_urls.map.with_index do |url, index|
+    futures = urls.map.with_index do |url, index|
       Concurrent::Future.execute(executor: executor, args: [url, index]) do |u, idx|
         url = u
         index = idx
+
         session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
+        begin
+          session.driver.browser.manage.window.maximize
+        rescue StandardError
+          nil
+        end
         begin
           logger.info 'In futures code to get session'
           session.visit('https://www.amazon.com')
@@ -307,8 +405,6 @@ class KindleDownloader
             next
           end
 
-          logger.info "Processing page #{index + 1}/#{page_urls.size}"
-
           # Add more robust retry mechanism
           retries = 0
           max_retries = 3 # Increased from 2
@@ -317,7 +413,7 @@ class KindleDownloader
           begin
             logger.info "visiting url: #{url}"
             session.visit(url)
-            if session.find('.ListItem-module_row__3orql', wait: 10)
+            if session.all('.ListItem-module_row__3orql', wait: 10)
               # Improved page load verification
               # Wait for either content or error messages
               logger.info 'entering process_page_content'
