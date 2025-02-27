@@ -405,10 +405,13 @@ class KindleDownloader
     end
 
     logger.info "Collected #{page_urls.size} pages through navigation"
-    page_urls
+    page_urls || [] # Ensure array return
   end
 
   def process_urls(urls)
+    # Convert to array if nil
+    urls = Array(urls)
+    
     logger.info "processing #{urls.count} urls"
 
     # Get cookies from authenticated main session
@@ -417,7 +420,7 @@ class KindleDownloader
     # Concurrent processing of discovered pages
     executor = Concurrent::ThreadPoolExecutor.new(
       max_threads: [@concurrency, 10].min, # Further reduce to 2 threads
-      max_queue: page_urls.size
+      max_queue: urls.size
     )
 
     logger.info 'about to execute urls with futures'
@@ -426,8 +429,8 @@ class KindleDownloader
       Concurrent::Future.execute(executor: executor, args: [url, index]) do |u, idx|
         url = u
         index = idx
+        session = nil
         begin
-
           session = Capybara::Session.new(Capybara.current_driver, Capybara.app)
           begin
             session.driver.browser.manage.window.maximize
@@ -436,7 +439,6 @@ class KindleDownloader
           end
           logger.info 'In futures code to get session'
           session.visit('https://www.amazon.com')
-          # sessing.driver.maximize_window  #  need handle
           # Share authentication cookies with new session
           auth_cookies.select do |c|
             c[:domain] = '.amazon.com'
@@ -499,21 +501,25 @@ class KindleDownloader
             end
           end
         rescue => e
-          log.error "Error in process urls\n#{e.message}"
+          logger.error "Error in process urls\n#{e.message}"
           puts e.message
         ensure
-          session.driver.quit
+          session&.driver&.quit
         end
       end
-      # Validate and merge results
-      page_cache = futures.each_with_object({}) do |future, cache|
-        result = future.value
-        cache[result[:page_number]] = result if result && result[:titles].any?
-      end
-
-      logger.info "Completed processing #{page_cache.size} valid pages"
-      page_cache
     end
+
+    # Add nil guard clause
+    return {} if futures.nil? || futures.empty?
+
+    # Validate and merge results
+    page_cache = futures.each_with_object({}) do |future, cache|
+      result = future.value
+      cache[result[:page_number]] = result if result && result[:titles].any?
+    end
+
+    logger.info "Completed processing #{page_cache.size} valid pages"
+    page_cache
   end
 
 
